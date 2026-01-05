@@ -76,9 +76,16 @@ public class JsonAvroConversion {
       }
       case ENUM -> new TextNode(obj.toString());
       case UNION -> {
-        ObjectNode node = MAPPER.createObjectNode();
         int unionIdx = GenericData.get().resolveUnion(avroSchema, obj);
         Schema selectedType = avroSchema.getTypes().get(unionIdx);
+        
+        // For nullable unions [null, type], flatten - return value directly
+        if (avroSchema.getTypes().size() == 2 && avroSchema.getTypes().contains(NULL_SCHEMA)) {
+          yield convertAvroToJson(obj, selectedType);
+        }
+        
+        // For complex unions, wrap with type name
+        ObjectNode node = MAPPER.createObjectNode();
         node.set(
             selectUnionTypeFieldName(avroSchema, selectedType, unionIdx),
             convertAvroToJson(obj, selectedType)
@@ -160,24 +167,28 @@ public class JsonAvroConversion {
     UUID("uuid", (obj, schema) -> new TextNode(obj.toString())),
 
     DECIMAL("decimal", (obj, schema) -> {
+      BigDecimal decimal;
       if (obj instanceof BigDecimal) {
-        return new DecimalNode((BigDecimal) obj);
-      }
-      if (obj instanceof ByteBuffer) {
+        decimal = (BigDecimal) obj;
+      } else if (obj instanceof ByteBuffer) {
         ByteBuffer buffer = (ByteBuffer) obj;
         byte[] bytes = new byte[buffer.remaining()];
         buffer.duplicate().get(bytes);
         int scale = (Integer) schema.getObjectProp("scale");
-        BigDecimal decimal = new BigDecimal(new java.math.BigInteger(bytes), scale);
-        return new DecimalNode(decimal);
-      }
-      if (obj instanceof GenericData.Fixed) {
+        decimal = new BigDecimal(new java.math.BigInteger(bytes), scale);
+      } else if (obj instanceof GenericData.Fixed) {
         byte[] bytes = ((GenericData.Fixed) obj).bytes();
         int scale = (Integer) schema.getObjectProp("scale");
-        BigDecimal decimal = new BigDecimal(new java.math.BigInteger(bytes), scale);
-        return new DecimalNode(decimal);
+        decimal = new BigDecimal(new java.math.BigInteger(bytes), scale);
+      } else {
+        return new TextNode(obj.toString());
       }
-      return new TextNode(obj.toString());
+      // Strip trailing zeros and handle zero specially to avoid "0E-10"
+      decimal = decimal.stripTrailingZeros();
+      if (decimal.compareTo(BigDecimal.ZERO) == 0) {
+        decimal = BigDecimal.ZERO;
+      }
+      return new DecimalNode(decimal);
     }),
 
     DATE("date", (obj, schema) -> {
